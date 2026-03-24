@@ -1,0 +1,4 @@
+# Flutter: project URL + publishable (anon) key — Dashboard → Settings → API
+# Do not commit real keys. Copy this file and fill locally, or use dart-define.
+SUPABASE_URL= https://qswwrzbvipcxnsrwdwwx.supabase.co
+SUPABASE_ANON_KEY= sb_publishable_sxWqjm8g2h6iXcLRuLM6JQ_VBkgDI9z

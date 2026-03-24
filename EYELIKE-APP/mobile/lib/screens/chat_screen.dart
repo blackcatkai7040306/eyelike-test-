@@ -37,6 +37,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     s.addListener(_onSession);
+    unawaited(s.loadMessagesForPeer(peerId));
     _rtcHandler = (dynamic raw) {
       unawaited(_handleIncomingRtc(raw));
     };

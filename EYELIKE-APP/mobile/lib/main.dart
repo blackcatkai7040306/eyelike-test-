@@ -1,13 +1,30 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' hide Session;
 
 import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
 import 'session.dart';
+import 'supabase_config.dart';
 import 'theme/eyelike_theme.dart' show buildEyelikeTheme, EyelikeColors;
 import 'widgets/optic_mesh_background.dart';
 
-void main() {
+/// Loads env and Supabase. Used from tests without [runApp].
+Future<void> bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: 'assets/env');
+  final url = dotenv.get('SUPABASE_URL', fallback: '').trim();
+  final key = dotenv.get('SUPABASE_ANON_KEY', fallback: '').trim();
+  if (url.isNotEmpty && key.isNotEmpty) {
+    await Supabase.initialize(url: url, anonKey: key);
+    supabaseAppReady = true;
+  } else {
+    supabaseAppReady = false;
+  }
+}
+
+Future<void> main() async {
+  await bootstrap();
   runApp(const EyelikeApp());
 }
 

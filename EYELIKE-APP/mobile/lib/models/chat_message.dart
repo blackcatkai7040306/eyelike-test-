@@ -26,4 +26,27 @@ class ChatMessage {
       mine: from == selfId,
     );
   }
+
+  /// Row from `public.messages` plus resolved display names.
+  factory ChatMessage.fromMessageRow(
+    Map<String, dynamic> row, {
+    required String selfId,
+    required String peerUsername,
+    required String myUsername,
+  }) {
+    final from = row['from_id'] as String;
+    final isMine = from == selfId;
+    final created = row['created_at'];
+    final at = created is String
+        ? created
+        : (created != null ? created.toString() : '');
+    return ChatMessage(
+      id: row['id'] as String,
+      fromUserId: from,
+      fromUsername: isMine ? myUsername : peerUsername,
+      text: row['body'] as String? ?? '',
+      at: at,
+      mine: isMine,
+    );
+  }
 }

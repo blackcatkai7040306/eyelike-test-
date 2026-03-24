@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../services/api_client.dart';
 import '../session.dart';
+import '../supabase_config.dart';
 import '../theme/eyelike_theme.dart';
 import '../widgets/iris_pulse.dart';
 import '../widgets/optic_mesh_background.dart';
@@ -16,7 +16,8 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  final _user = TextEditingController();
+  final _email = TextEditingController();
+  final _display = TextEditingController();
   final _pass = TextEditingController();
   final _server = TextEditingController();
   bool _busy = false;
@@ -30,7 +31,8 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   void dispose() {
-    _user.dispose();
+    _email.dispose();
+    _display.dispose();
     _pass.dispose();
     _server.dispose();
     super.dispose();
@@ -44,8 +46,6 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       await widget.session.persistServer(_server.text);
       await fn();
-    } on ApiException catch (e) {
-      setState(() => _error = e.message);
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -76,7 +76,7 @@ class _AuthScreenState extends State<AuthScreen> {
                             children: [
                               Text('EYELIKE', style: titleEyelike(28)),
                               Text(
-                                'Test harness · Socket.IO + WebRTC',
+                                'Supabase + Socket.IO + WebRTC',
                                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                       color: EyelikeColors.dim,
                                       letterSpacing: 0.4,
@@ -87,11 +87,18 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                       ],
                     ),
+                    if (!supabaseAppReady) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        'Add SUPABASE_URL and SUPABASE_ANON_KEY to assets/env (see comments in that file).',
+                        style: TextStyle(color: Theme.of(context).colorScheme.secondary, fontSize: 12),
+                      ),
+                    ],
                     const SizedBox(height: 28),
                     TextField(
                       controller: _server,
                       decoration: const InputDecoration(
-                        labelText: 'Server base URL',
+                        labelText: 'Realtime server (Socket.IO)',
                         hintText: 'http://10.0.2.2:3001',
                       ),
                       keyboardType: TextInputType.url,
@@ -99,8 +106,22 @@ class _AuthScreenState extends State<AuthScreen> {
                     ),
                     const SizedBox(height: 12),
                     TextField(
-                      controller: _user,
-                      decoration: const InputDecoration(labelText: 'Username'),
+                      controller: _email,
+                      decoration: const InputDecoration(
+                        labelText: 'Email',
+                        hintText: 'you@example.com',
+                      ),
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      autocorrect: false,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _display,
+                      decoration: const InputDecoration(
+                        labelText: 'Display name (signup only)',
+                        hintText: 'Shown to other users',
+                      ),
                       textInputAction: TextInputAction.next,
                       autocorrect: false,
                     ),
@@ -109,7 +130,9 @@ class _AuthScreenState extends State<AuthScreen> {
                       controller: _pass,
                       decoration: const InputDecoration(labelText: 'Password'),
                       obscureText: true,
-                      onSubmitted: (_) => _busy ? null : _wrap(() => widget.session.login(_user.text, _pass.text)),
+                      onSubmitted: (_) => _busy
+                          ? null
+                          : _wrap(() => widget.session.login(_email.text, _pass.text)),
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
@@ -120,21 +143,27 @@ class _AuthScreenState extends State<AuthScreen> {
                     ],
                     const SizedBox(height: 20),
                     ElevatedButton(
-                      onPressed: _busy
+                      onPressed: _busy || !supabaseAppReady
                           ? null
-                          : () => _wrap(() => widget.session.login(_user.text, _pass.text)),
+                          : () => _wrap(() => widget.session.login(_email.text, _pass.text)),
                       child: Text(_busy ? '…' : 'Sign in'),
                     ),
                     const SizedBox(height: 10),
                     OutlinedButton(
-                      onPressed: _busy
+                      onPressed: _busy || !supabaseAppReady
                           ? null
-                          : () => _wrap(() => widget.session.register(_user.text, _pass.text)),
+                          : () => _wrap(
+                                () => widget.session.register(
+                                  _email.text,
+                                  _pass.text,
+                                  _display.text,
+                                ),
+                              ),
                       child: const Text('Create account'),
                     ),
                     const SizedBox(height: 24),
                     Text(
-                      'Physical device: use your PC LAN IP (same Wi‑Fi), not localhost.',
+                      'Ensure Supabase has profiles + messages with RLS as you defined. Physical device: use your PC LAN IP for the Socket server.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(color: EyelikeColors.dim),
                     ),
                   ],

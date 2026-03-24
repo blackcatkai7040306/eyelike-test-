@@ -3,12 +3,8 @@ import http from "http";
 import express from "express";
 import cors from "cors";
 import { Server } from "socket.io";
-import { signToken, verifyToken } from "./auth.js";
+import { verifyToken } from "./auth.js";
 import {
-  createUser,
-  verifyLogin,
-  getUserById,
-  listUsers,
   registerSocket,
   unregisterSocket,
   isUserOnline,
@@ -18,63 +14,18 @@ import {
 const PORT = Number(process.env.PORT) || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
+if (!process.env.SUPABASE_JWT_SECRET) {
+  console.warn(
+    "[eyelike] SUPABASE_JWT_SECRET is not set — Socket auth will reject all tokens."
+  );
+}
+
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN }));
 app.use(express.json());
 
-function authMiddleware(req, res, next) {
-  const header = req.headers.authorization;
-  const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
-  const user = verifyToken(token);
-  if (!user) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  req.user = user;
-  next();
-}
-
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "eyelike" });
-});
-
-app.post("/api/auth/register", (req, res) => {
-  try {
-    const { username, password } = req.body || {};
-    if (!username || !password) {
-      res.status(400).json({ error: "username and password required" });
-      return;
-    }
-    const user = createUser(String(username), String(password));
-    const token = signToken(user);
-    res.status(201).json({ user, token });
-  } catch (e) {
-    res.status(400).json({ error: e.message || "register failed" });
-  }
-});
-
-app.post("/api/auth/login", (req, res) => {
-  const { username, password } = req.body || {};
-  if (!username || !password) {
-    res.status(400).json({ error: "username and password required" });
-    return;
-  }
-  const user = verifyLogin(String(username), String(password));
-  if (!user) {
-    res.status(401).json({ error: "Invalid credentials" });
-    return;
-  }
-  res.json({ user, token: signToken(user) });
-});
-
-app.get("/api/users", authMiddleware, (req, res) => {
-  const others = listUsers()
-    .filter((u) => u.id !== req.user.id)
-    .map((u) => ({
-      ...u,
-      online: isUserOnline(u.id),
-    }));
-  res.json({ users: others, onlineIds: getOnlineUserIds() });
+  res.json({ ok: true, service: "eyelike", auth: "supabase-jwt" });
 });
 
 const server = http.createServer(app);
@@ -117,18 +68,19 @@ io.on("connection", (socket) => {
       ack?.({ ok: false, error: "invalid" });
       return;
     }
-    const peer = getUserById(toUserId);
-    if (!peer) {
-      ack?.({ ok: false, error: "user not found" });
-      return;
-    }
     const message = {
-      id: `${Date.now()}-${socket.id}`,
+      id:
+        typeof payload?.messageId === "string"
+          ? payload.messageId
+          : `${Date.now()}-${socket.id}`,
       fromUserId: user.id,
       fromUsername: user.username,
       toUserId,
       text: text.slice(0, 4000),
-      at: new Date().toISOString(),
+      at:
+        typeof payload?.at === "string"
+          ? payload.at
+          : new Date().toISOString(),
       clientNonce: payload?.clientNonce,
     };
     io.to(`user:${toUserId}`).emit("chat:private", message);
@@ -138,12 +90,13 @@ io.on("connection", (socket) => {
   socket.on("webrtc:signal", (payload) => {
     const toUserId = payload?.toUserId;
     if (!toUserId || !payload?.type) return;
-    if (!getUserById(toUserId)) return;
     io.to(`user:${toUserId}`).emit("webrtc:signal", {
       fromUserId: user.id,
       type: payload.type,
       sdp: payload.sdp,
       candidate: payload.candidate,
+      sdpMid: payload.sdpMid,
+      sdpMLineIndex: payload.sdpMLineIndex,
     });
   });
 

@@ -1,17 +1,16 @@
-import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
+import 'package:supabase_flutter/supabase_flutter.dart' hide Session;
 
 import 'config.dart';
 import 'models/app_user.dart';
 import 'models/chat_message.dart';
-import 'services/api_client.dart';
+import 'supabase_config.dart';
 
 class Session extends ChangeNotifier {
-  static const _kToken = 'eyelike_token';
-  static const _kUser = 'eyelike_user_json';
   static const _kServer = 'eyelike_server';
 
   String serverBaseUrl = defaultServerBaseUrl();
@@ -25,41 +24,76 @@ class Session extends ChangeNotifier {
   List<PeerProfile> peers = [];
   Set<String> onlineIds = {};
 
-  ApiClient get api => ApiClient(baseUrl: serverBaseUrl);
+  StreamSubscription<AuthState>? _authSub;
+
+  SupabaseClient? get _sb => supabaseAppReady ? Supabase.instance.client : null;
+
+  String _peerUsername(String peerId) {
+    for (final p in peers) {
+      if (p.id == peerId) return p.username;
+    }
+    return '?';
+  }
 
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     serverBaseUrl = p.getString(_kServer) ?? defaultServerBaseUrl();
-    token = p.getString(_kToken);
-    final raw = p.getString(_kUser);
-    if (raw != null) {
-      try {
-        user = AppUser.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-      } catch (_) {
-        user = null;
+
+    if (supabaseAppReady) {
+      _authSub ??= Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+        final ev = data.event;
+        if (ev == AuthChangeEvent.signedIn ||
+            ev == AuthChangeEvent.tokenRefreshed ||
+            ev == AuthChangeEvent.userUpdated) {
+          unawaited(_afterAuthChange());
+        }
+        if (ev == AuthChangeEvent.signedOut) {
+          disconnectSocket();
+          user = null;
+          token = null;
+          peers = [];
+          onlineIds = {};
+          messagesByPeer.clear();
+          notifyListeners();
+        }
+      });
+
+      await _syncUserFromSupabase();
+      if (user != null && token != null) {
+        await connectSocket();
+        await refreshPeers();
       }
-    }
-    if (token != null && user == null) {
-      token = null;
-      await p.remove(_kToken);
-    }
-    if (user != null && token != null) {
-      await connectSocket();
-      await refreshPeers();
     }
     notifyListeners();
   }
 
-  Future<void> persistAuth(String t, AppUser u) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString(_kToken, t);
-    await p.setString(
-      _kUser,
-      jsonEncode({'id': u.id, 'username': u.username}),
-    );
-    token = t;
-    user = u;
+  Future<void> _afterAuthChange() async {
+    await _syncUserFromSupabase();
+    if (user != null && token != null) {
+      await connectSocket();
+      await refreshPeers();
+    } else {
+      disconnectSocket();
+    }
     notifyListeners();
+  }
+
+  Future<void> _syncUserFromSupabase() async {
+    final client = _sb;
+    if (client == null) return;
+    final authSession = client.auth.currentSession;
+    if (authSession == null) {
+      user = null;
+      token = null;
+      return;
+    }
+    token = authSession.accessToken;
+    final uid = authSession.user.id;
+    final profile = await client.from('profiles').select().eq('id', uid).maybeSingle();
+    final uname = profile?['username'] as String? ??
+        authSession.user.email?.split('@').first ??
+        'user';
+    user = AppUser(id: uid, username: uname);
   }
 
   Future<void> persistServer(String url) async {
@@ -70,31 +104,48 @@ class Session extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> login(String username, String password) async {
-    final body = await api.login(username: username, password: password);
-    final u = AppUser.fromJson(body['user'] as Map<String, dynamic>);
-    final t = body['token'] as String;
-    await persistAuth(t, u);
+  Future<void> login(String email, String password) async {
+    final client = _sb;
+    if (client == null) {
+      throw StateError('Supabase is not configured. Fill mobile/assets/env');
+    }
+    await client.auth.signInWithPassword(email: email.trim(), password: password);
+    await _syncUserFromSupabase();
     await connectSocket();
     await refreshPeers();
+    notifyListeners();
   }
 
-  Future<void> register(String username, String password) async {
-    final body = await api.register(username: username, password: password);
-    final u = AppUser.fromJson(body['user'] as Map<String, dynamic>);
-    final t = body['token'] as String;
-    await persistAuth(t, u);
+  Future<void> register(String email, String password, String displayUsername) async {
+    final client = _sb;
+    if (client == null) {
+      throw StateError('Supabase is not configured. Fill mobile/assets/env');
+    }
+    final u = displayUsername.trim();
+    if (u.length < 2) {
+      throw ArgumentError('Display name too short');
+    }
+    final res = await client.auth.signUp(
+      email: email.trim(),
+      password: password,
+      data: {'username': u},
+    );
+    if (res.session == null) {
+      throw StateError(
+        'Check your email to confirm signup, or disable email confirmation in Supabase Auth settings.',
+      );
+    }
+    await _syncUserFromSupabase();
     await connectSocket();
     await refreshPeers();
+    notifyListeners();
   }
 
   Future<void> logout() async {
     disconnectSocket();
-    final p = await SharedPreferences.getInstance();
-    await p.remove(_kToken);
-    await p.remove(_kUser);
-    token = null;
+    await _sb?.auth.signOut();
     user = null;
+    token = null;
     peers = [];
     onlineIds = {};
     messagesByPeer.clear();
@@ -102,8 +153,45 @@ class Session extends ChangeNotifier {
   }
 
   Future<void> refreshPeers() async {
-    if (token == null) return;
-    peers = await api.fetchPeers(token!);
+    final client = _sb;
+    final self = user?.id;
+    if (client == null || self == null) return;
+    final rows = await client.from('profiles').select().neq('id', self);
+    final list = rows as List<dynamic>;
+    peers = list.map((e) {
+      final m = Map<String, dynamic>.from(e as Map);
+      final id = m['id'] as String;
+      return PeerProfile(
+        id: id,
+        username: m['username'] as String? ?? '?',
+        online: onlineIds.contains(id),
+      );
+    }).toList();
+    notifyListeners();
+  }
+
+  Future<void> loadMessagesForPeer(String peerId) async {
+    final client = _sb;
+    final self = user?.id;
+    if (client == null || self == null) return;
+    final peerName = _peerUsername(peerId);
+    final myName = user?.username ?? '?';
+
+    final filter =
+        'and(from_id.eq.$self,to_id.eq.$peerId),and(from_id.eq.$peerId,to_id.eq.$self)';
+    final rows = await client.from('messages').select().or(filter).order('created_at');
+
+    final list = rows as List<dynamic>;
+    final msgs = list.map((e) {
+      final row = Map<String, dynamic>.from(e as Map);
+      return ChatMessage.fromMessageRow(
+        row,
+        selfId: self,
+        peerUsername: peerName,
+        myUsername: myName,
+      );
+    }).toList();
+    messagesByPeer[peerId] = msgs;
     notifyListeners();
   }
 
@@ -145,8 +233,13 @@ class Session extends ChangeNotifier {
       if (self == null) return;
       final other =
           m['fromUserId'] == self ? m['toUserId'] as String : m['fromUserId'] as String;
+      final id = m['id'] as String? ?? '';
+      final bucket = messagesByPeer.putIfAbsent(other, () => []);
+      if (id.isNotEmpty && bucket.any((x) => x.id == id)) {
+        return;
+      }
       final msg = ChatMessage.fromServer(m, selfId: self);
-      messagesByPeer.putIfAbsent(other, () => []).add(msg);
+      bucket.add(msg);
       notifyListeners();
     });
 
@@ -180,18 +273,52 @@ class Session extends ChangeNotifier {
   }
 
   Future<void> sendPrivateMessage(String toUserId, String text) async {
-    final s = socket;
+    final client = _sb;
+    final sock = socket;
     final self = user;
-    if (s == null || self == null || !s.connected) return;
+    if (client == null || self == null) return;
+
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    final row = await client
+        .from('messages')
+        .insert({
+          'from_id': self.id,
+          'to_id': toUserId,
+          'body': trimmed,
+        })
+        .select()
+        .single();
+
+    final peerName = _peerUsername(toUserId);
+    final msg = ChatMessage.fromMessageRow(
+      Map<String, dynamic>.from(row),
+      selfId: self.id,
+      peerUsername: peerName,
+      myUsername: self.username,
+    );
+    final bucket = messagesByPeer.putIfAbsent(toUserId, () => []);
+    if (!bucket.any((x) => x.id == msg.id)) {
+      bucket.add(msg);
+    }
+    notifyListeners();
+
+    if (sock == null || !sock.connected) return;
+
     final nonce = DateTime.now().microsecondsSinceEpoch.toString();
-    s.emitWithAck(
+    sock.emitWithAck(
       'chat:private',
-      {'toUserId': toUserId, 'text': text, 'clientNonce': nonce},
+      {
+        'toUserId': toUserId,
+        'text': trimmed,
+        'messageId': msg.id,
+        'at': msg.at,
+        'clientNonce': nonce,
+      },
       ack: (dynamic data, [dynamic _]) {
-        if (data is Map && data['ok'] == true && data['message'] != null) {
-          final m = Map<String, dynamic>.from(data['message'] as Map);
-          final msg = ChatMessage.fromServer(m, selfId: self.id);
-          messagesByPeer.putIfAbsent(toUserId, () => []).add(msg);
+        if (data is Map && data['ok'] != true) {
+          socketError = data['error']?.toString() ?? 'send failed';
           notifyListeners();
         }
       },
@@ -205,6 +332,7 @@ class Session extends ChangeNotifier {
 
   @override
   void dispose() {
+    _authSub?.cancel();
     disconnectSocket();
     super.dispose();
   }
